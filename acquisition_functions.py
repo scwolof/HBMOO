@@ -2,8 +2,6 @@
 import numpy as np 
 from scipy.stats import norm as ssn
 
-from pdb import set_trace as st
-
 
 class EHVI:
     """
