@@ -2,214 +2,223 @@
 import numpy as np 
 from scipy.stats import norm as ssn
 
+from pdb import set_trace as st
+
 
 class EHVI:
-	"""
-	EXPECTED HYPER-VOLUME IMPROVEMENT
+    """
+    EXPECTED HYPER-VOLUME IMPROVEMENT
 
-	Inputs:
-		P 		Pareto front. P.shape = [np,2]
-		r 		Boundaries. r = np.array([[min(f_det),max(f_det)],[min(f_prob),max(f_prob)]])
-		model	GP model (see reggie package)
-		detf	Deterministic function. Must take array inputs, and return gradients if grad=True (see use below).
+    Inputs:
+        P       Pareto front. P.shape = [n, 2]
+        r       Boundaries. r = np.array([ [min(f_det),  max(f_det)],
+                                           [min(f_prob), max(f_prob)] ])
+        model   GP model (see reggie package)
+        detf    Deterministic function. Must take array inputs, and return
+                gradients if grad=True (see use below).
 
-	Outputs:
-		EI 		Expected improvement
-		dEI 	(if grad=True) gradients of expected improvement w.r.t. input X  
+    Outputs:
+        EI      Expected improvement
+        dEI     (if grad=True) gradients of EI w.r.t. input X  
 
-	(C) 2018 by Simon Olofsson
-	"""
+    (C) 2018 by Simon Olofsson
+    
+    """
+    def __init__ (self,P,r,model,detf):
+        self.P     = P
+        self.r     = r
+        self.model = model.copy()
+        self.detf  = detf
+    @property
+    def pe (self):
+        # Extended pareto points
+        p0 = np.array([self.r[0,0],self.r[1,1]])
+        p1 = np.array([self.r[0,1],self.r[1,0]])
+        return np.vstack((p0,self.P,p1))
+    @property
+    def V (self):   
+        # Area covered by first i points on Pareto frontier
+        V0 = 0
+        Vs = (self.pe[:-2,1]-self.P[:,1]) * (self.r[0,1]-self.P[:,0])
+        return np.cumsum( np.concatenate(([0],Vs,[0])) )
 
-	def __init__ (self,P,r,model,detf):
-		# Pareto front
-		self.P = P.copy()
-		# Function boundaries
-		self.r = r
-		# Probabilistic model
-		self.model = model.copy()
-		# Deterministic function
-		self.detf = detf
-		# Extended pareto points
-		self.pe = np.vstack((np.array([r[0,0],r[1,1]]),P.copy(),np.array([r[0,1],r[1,0]])))
-		# Volumes
-		self.V = np.cumsum(np.append(np.append(0,(self.pe[:-2,1]-self.P[:,1])*(self.r[0,1]-self.P[:,0])),0))
+    def __call__ (self,X,grad=False):
+        X = X.copy() if X.ndim > 1 else X[None,:]
 
-	def __call__ (self,X,grad=False):
-		X = X.copy()
-		if X.ndim == 1: X = X[None,:]
-		leng = len(X)
+        # Compute yhat and variance
+        post  = self.model.predict(X,grad=grad)
+        mu,s2 = post[:2]
+        f     = self.detf(X,grad=grad)
+        if grad: 
+            f,df = f
+            dh   = np.zeros(X.shape)
+            dmu  = post[2]
+            ds2  = post[3]
+        
+        h = np.zeros(len(X))
+        for m in range(len(X)):
+            ht = self.ehvisum(f[m],mu[m],s2[m],grad=grad)
+            if not grad: 
+                h[m] = ht
+            else:
+                h[m]  = ht[0]
+                dh[m] = ht[1]*df[m] + ht[2]*dmu[m] + ht[3]*ds2[m]
 
-		# Compute yhat and variance
-		post = self.model.predict(X,grad=grad)
-		if grad: 
-			c,dc = self.detf(X,grad=True)
-			dh = np.zeros(X.shape)
-		else: 
-			c = self.detf(X,grad=False)
+        return h if not grad else [h,dh]
 
-		mu,s2 = post[:2]
-		yhat = np.c_[c,mu]
-		
-		h = np.zeros(leng)
-		for m in range(leng):
-			ht = self.ehvisum(yhat[m],s2[m],grad=grad)
-			if not grad: 
-				h[m] = ht
-			else:
-				h[m] = ht[0]
-				dh[m] = np.dot(ht[1],np.vstack((dc[m],post[2][m]))) + ht[2]*post[3][m]
+    def ehvisum (self,f,mu,s2,grad=False):
+        dist = ssn(mu,np.sqrt(s2)) # distribution
 
-		if not grad: return h
-		return h, dh
+        h1 = np.sum( self.P[:,0] < f )      # Lower index
+        j  = np.arange(h1, len(self.P)+1)   # Range of j's
+        h2 = j + 1                          # Upper indices
 
-	def ehvisum (self,mu,s2,grad=False):
+        pe = self.pe
 
-		# Standard deviation
-		s = np.sqrt(s2)
-		# Distribution with mean and standard deviation
-		dist = ssn(mu[1],s)
+        cdf1 = dist.cdf( pe[ j, 1] )
+        cdf2 = dist.cdf( pe[h2, 1] )
+        cdf  = cdf1 - cdf2
 
-		# Lower index
-		h1 = np.sum(self.P[:,0]<mu[0])
-		# Range of j's
-		j = np.array(range(h1,len(self.P)+1))
-		# Upper indices
-		h2 = j+1
-		cdf1 = dist.cdf(self.pe[j,1]); cdf2 = dist.cdf(self.pe[h2,1])
-		cdf = cdf1-cdf2
-		pdf1 = dist.pdf(self.pe[j,1]); pdf2 = dist.pdf(self.pe[h2,1])
-		pdf = pdf1-pdf2
-		# Expected hyper-volume improvement
-		sum1 = (self.V[h1] - self.V[h2] + self.pe[h1,1]*(self.r[0,1]-mu[0]) - self.pe[h2,1]*(self.r[0,1]-self.pe[h2,0]) + mu[1]*(mu[0]-self.pe[h2,0]))
-		EI = np.sum(sum1*cdf - (mu[0]-self.pe[h2,0])*s2*pdf)
-		# Gradients
-		if not grad: return EI
-		t0 = pdf1*(self.pe[j,1]-mu[1])-pdf2*(self.pe[j+1,1]-mu[1])
-		t1 = pdf1*((self.pe[j,1]-mu[1])**2/(2*s2)-0.5) - pdf2*((self.pe[j+1,1]-mu[1])**2/(2*s2)-0.5)
-		dmu0 = np.sum((mu[1]-self.pe[h1,1])*cdf - s2*pdf)
-		dmu1 = np.sum((mu[0]-self.pe[h2,0])*cdf - sum1*pdf - (mu[0]-self.pe[h2,0])*t0)
-		ds2 = np.sum(-0.5*sum1*t0/s2 - (mu[0]-self.pe[h2,0])*(pdf+t1))
-		return EI, np.array([dmu0, dmu1]), ds2
+        pdf1 = dist.pdf( pe[ j, 1] )
+        pdf2 = dist.pdf( pe[h2, 1] )
+        pdf  = pdf1 - pdf2
+
+        fp2  = f-pe[h2,0]
+        # Expected hyper-volume improvement
+        V  = self.V
+        r  = self.r
+        sum1 = (V[h1] - V[h2] + mu * fp2
+                + pe[h1,1] * (r[0,1]-f) \
+                - pe[h2,1] * (r[0,1]-pe[h2,0]))
+        EI = np.sum( sum1*cdf - fp2*s2*pdf )
+        if not grad: return EI
+
+        # Gradients
+        mp1 = pe[j,  1] - mu
+        mp2 = pe[j+1,1] - mu
+        t0  = pdf1*mp1 - pdf2*mp2
+        t1  = pdf1*(mp1**2/(2*s2)-0.5) - pdf2*(mp2**2/(2*s2)-0.5)
+        df  = np.sum( (mu-pe[h1,1])*cdf - s2*pdf )
+        dmu = np.sum( fp2*cdf - sum1*pdf - fp2*t0 )
+        ds2 = np.sum( -0.5*sum1*t0/s2 - fp2*(pdf+t1) )
+        return EI, df, dmu, ds2
 
 
 
 
 class EMmI:
-	"""
-	EXPECTED MAXIMIN FITNESS
+    """
+    EXPECTED MAXIMIN FITNESS
 
-	Inputs:
-		P 		Pareto front. P.shape = [np,2]
-		model	GP model (see reggie package)
-		detf	Deterministic function. Must take array inputs, and return gradients if grad=True (see use below).
+    Inputs:
+        P       Pareto front. P.shape = [np,2]
+        model   GP model (see reggie package)
+        detf    Deterministic function. Must take array inputs, and return 
+                gradients if grad=True (see use below).
 
-	Outputs:
-		EI 		Expected maximin fitness
-		dEI 	(if grad=True) gradients of expected maximin fitness w.r.t. input X  
+    Outputs:
+        EI      Expected maximin fitness
+        dEI     (if grad=True) gradients of EI w.r.t. input X
 
-	(C) 2018 by Simon Olofsson
-	
-	"""
+    (C) 2018 by Simon Olofsson
+    
+    """
 
-	def __init__ (self,P,model,detf):
-		# Pareto front
-		self.P = P.copy()
-		# Probabilistic model
-		self.model = model.copy()
-		# Deterministic function
-		self.detf = detf
+    def __init__ (self,P,model,detf):
+        self.P     = P
+        self.model = model.copy()
+        self.detf  = detf
 
-	def __call__ (self,X,grad=False):
-		X = X.copy()
-		if X.ndim == 1: X = X[None,:]
-		leng = len(X)
+    def __call__ (self,X,grad=False):
+        X = X.copy() if X.ndim > 1 else X[None,:]
 
-		# Compute yhat and variance
-		post = self.model.predict(X,grad=grad)
-		if grad: 
-			c,dc = self.detf(X,grad=True)
-			dh = np.zeros(X.shape)
-		else: 
-			c = self.detf(X,grad=False)
+        # Compute yhat and variance
+        post  = self.model.predict(X,grad=grad)
+        mu,s2 = post[:2]
+        f     = self.detf(X,grad=grad)
+        if grad: 
+            f,df = f
+            dh   = np.zeros(X.shape)
+            dmu  = post[2]
+            ds2  = post[3]
+        
+        h = np.zeros(len(X))
+        for m in range(len(X)):
+            ht = self.emmisum(f[m],mu[m],s2[m],grad=grad)
+            if not grad: 
+                h[m] = ht
+            else:
+                h[m]  = ht[0]
+                dh[m] = ht[1]*df[m] + ht[2]*dmu[m] + ht[3]*ds2[m]
 
-		mu,s2 = post[:2]
-		yhat = np.c_[c,mu]
-		
-		h = np.zeros(leng)
-		for m in range(leng):
-			ht = self.emmisum(yhat[m],s2[m],grad=grad)
-			if not grad: 
-				h[m] = ht
-			else:
-				h[m] = ht[0]
-				dh[m] = np.dot(ht[1],np.vstack((dc[m],post[2][m]))) + ht[2]*post[3][m]
+        return h if not grad else [h,dh]
 
-		if not grad: return h
-		return h, dh
+    def emmisum (self,f,mu,s2,grad=False):
+        dist = ssn(mu,np.sqrt(s2)) # distribution
 
-	def emmisum (self,mu,s2,grad=False):
+        pf0  = self.P[:,0] - f
 
-		# Standard deviation
-		s = np.sqrt(s2)
-		# Distribution with mean and standard deviation
-		dist = ssn(mu[1],s)
+        # sum Int(1,:)
+        def Int1 ():
+            p1   = np.append(np.inf, self.P[:-1,0])
 
-		# Get points on Pareto front, for axis i, shifted by add_to_j
-		def p (i,add_to_j): 
-			if add_to_j < 0: return np.append(float('inf'),self.P[:-1,i])
-			elif add_to_j > 0: return np.append(self.P[1:,i],float('inf'))
-			else: return self.P[:,i].copy()		
+            dlt  = ( pf0 >= 0 ).astype(int)
+            # Define bounds
+            bnds = np.c_[ self.P[:,1]-pf0, p1-pf0 ]
+            
+            cdf  = dlt * (dist.cdf(bnds[:,1]) - dist.cdf(bnds[:,0]))
 
-		# sum Int(1,:)
-		def Int1 (): 
-			# Define bounds
-			bounds = np.c_[ mu[0]+p(1,0)-p(0,0), mu[0]+p(1,-1)-p(0,0) ]
-			cdf = dist.cdf(bounds[:,1]) - dist.cdf(bounds[:,0])
-			# Delta function 
-			delta = (mu[0] < p(0,0)).astype(int)
-			# Sum elements for which mu[0] < p(0,j)
-			int1 = np.dot(delta,(p(0,0)-mu[0])*cdf)
-			if not grad: return int1
-			# Gradients
-			pdf0 = dist.pdf(bounds[:,0])
-			pdf1 = dist.pdf(bounds[:,1])
-			pdf = (p(0,0)-mu[0])*(pdf1-pdf0)
-			dmu = np.dot(delta, np.c_[-cdf+pdf, -pdf])
-			ds2 = np.dot(delta,-0.5*(p(0,0)-mu[0])*(pdf1*(np.append(0,bounds[1:,1])-mu[1])/s2 - 
-											   		pdf0*(bounds[:,0]-mu[1])/s2))
-			return int1, dmu, ds2
+            int1 = np.sum( pf0 * cdf)
+            if not grad: return int1
 
-		# sum Int(2,:)
-		def Int2 ():
-			# Define bounds
-			bounds = np.c_[ mu[0]+p(1,0)-p(0,1), np.amin(np.c_[p(1,0), mu[0]+p(1,0)-p(0,0)], axis=1) ]
-			cdf = dist.cdf(bounds[:,1]) - dist.cdf(bounds[:,0])
-			pdf0 = dist.pdf(bounds[:,0])
-			pdf1 = dist.pdf(bounds[:,1])
-			pdf = pdf1-pdf0
-			# Delta function 
-			delta = (mu[0] < p(0,1)).astype(int)
-			# Sum elements for which mu[0] < p(0,j+1)
-			int2 = np.dot(delta, (p(1,0)-mu[1])*cdf + s2*pdf)
-			if not grad: return int2
-			# Gradients
-			t0 = pdf1*(bounds[:,1]-mu[1]) - pdf0*(np.append(bounds[:-1,0],0)-mu[1])
-			t1 = pdf1*((bounds[:,1]-mu[1])**2/(2*s2)-0.5) - pdf0*((np.append(bounds[:-1,0],0)-mu[1])**2/(2*s2)-0.5)
-			dmu = np.dot(delta, np.c_[ (p(1,0)-mu[1])*pdf-t0, -(cdf+(p(1,0)-mu[1])*pdf)+t0 ])
-			ds2 = np.dot(delta,-0.5*(p(1,0)-mu[1])*t0/s2 + pdf+t1)
+            pdf0 = dlt * dist.pdf(bnds[:,0])
+            pdf1 = dlt * dist.pdf(bnds[:,1])
+            pdf  = pf0 * (pdf1 - pdf0)
+            # Gradients
+            df   =  np.sum( pdf - cdf )
+            dmu  = -np.sum( pdf )
+            
+            pdf0 *= bnds[:,0] - mu
+            pdf1 *= np.append(0,bnds[1:,1]) - mu
+            ds2  = -np.sum(0.5 * pf0 * (pdf1 - pdf0)/s2)
+            return int1, df, dmu, ds2
 
-			return int2, dmu, ds2
+        # sum Int(2,:)
+        def Int2 ():
+            pf1  = np.append(self.P[1:,0], np.inf) - f
+            p1   = self.P[:,1]
+            pm1  = p1 - mu
 
-		i1 = Int1(); i2 = Int2()
-		if not grad: return i1+i2
+            dlt  = (pf1 >= 0).astype(int)
+            # Define bounds
+            bnds = np.c_[ p1-pf1, np.amin(np.c_[p1,p1-pf0],axis=1) ]
 
-		emmi = i1[0] + i2[0]
-		dmu = i1[1] + i2[1]
-		ds = i1[2] + i2[2]
-		return emmi, dmu, ds
+            cdf  = dlt * (dist.cdf(bnds[:,1]) - dist.cdf(bnds[:,0]))
 
+            pdf0 = dlt * dist.pdf(bnds[:,0])
+            pdf1 = dlt * dist.pdf(bnds[:,1])
+            pdf  = pdf1 - pdf0
 
+            int2 = np.sum(pm1*cdf + s2*pdf)
+            if not grad: return int2
 
+            d0   = np.append(bnds[:-1,0],0) - mu
+            d1   = bnds[:,1] - mu
+            t0   = pdf1 * d1 - pdf0 * d0
+            t1   = 0.5 * (pdf1 * d1**2 - pdf0 * d0**2)/s2 - 0.5 * pdf
+            # Gradients
+            df   = np.sum( pm1 * pdf - t0)
+            dmu  = np.sum( cdf ) - df
+            ds2  = np.sum( pdf + t1 - 0.5 * pm1 * t0/s2)
 
+            return int2, df, dmu, ds2
 
+        i1 = Int1(); i2 = Int2()
+        if not grad: return i1+i2
+
+        EI   = i1[0] + i2[0]
+        df   = i1[1] + i2[1]
+        dmu  = i1[2] + i2[2]
+        ds   = i1[3] + i2[3]
+        return EI, df, dmu, ds
 
