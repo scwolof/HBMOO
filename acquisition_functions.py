@@ -18,7 +18,6 @@ class EHVI:
 		dEI 	(if grad=True) gradients of expected improvement w.r.t. input X  
 
 	(C) 2018 by Simon Olofsson
-	
 	"""
 
 	def __init__ (self,P,r,model,detf):
